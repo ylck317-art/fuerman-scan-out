@@ -91,6 +91,26 @@ body[data-theme="light"][data-colorful="on"] .tool{background-opacity:.04}
   border-radius:10px;border:1px solid var(--border2);background:var(--panel);color:var(--text2);
   cursor:pointer;font-size:17px;transition:.16s}
 .theme-btn:hover{border-color:var(--brand);color:var(--text);transform:translateY(-1px)}
+
+/* 刷新按钮 + toast */
+.refresh-btn{display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 14px;
+  border-radius:10px;border:1px solid var(--border2);background:var(--panel);color:var(--text2);
+  cursor:pointer;font-size:13.5px;font-weight:600;transition:.16s;white-space:nowrap}
+.refresh-btn:hover{border-color:var(--brand);color:var(--text);transform:translateY(-1px)}
+.refresh-btn:disabled{opacity:.65;cursor:wait;transform:none}
+.refresh-btn .spin{width:14px;height:14px;border:2px solid var(--border2);border-top-color:var(--brand2);
+  border-radius:50%;display:none;animation:rfspin .7s linear infinite}
+.refresh-btn.loading .spin{display:inline-block}
+.refresh-btn.loading .rf-ico{display:none}
+@keyframes rfspin{to{transform:rotate(360deg)}}
+.wb-toast{position:fixed;top:22px;left:50%;transform:translateX(-50%) translateY(-12px);
+  background:rgba(15,23,42,.92);color:#fff;padding:10px 18px;border-radius:10px;
+  font-size:13.5px;font-weight:600;z-index:9999;opacity:0;pointer-events:none;
+  box-shadow:0 10px 28px rgba(0,0,0,.35);border:1px solid rgba(148,163,184,.35);
+  transition:opacity .2s,transform .2s}
+.wb-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.wb-toast.err{background:rgba(127,29,29,.95);border-color:rgba(248,113,113,.45)}
+
 .theme-pop{position:absolute;top:calc(100% + 8px);right:0;width:248px;background:var(--menu-bg);
   border:1px solid var(--border2);border-radius:13px;padding:14px;z-index:60;display:none;
   box-shadow:0 16px 40px rgba(0,0,0,.4)}
@@ -550,6 +570,7 @@ select:hover{border-color:#818cf8;color:#fff}
 </style>
 </head>
 <body>
+<div class="wb-toast" id="wbToast" role="status" aria-live="polite"></div>
 <div class="loading" id="loading"><div class="spinner"></div></div>
 <div class="app">
   <!-- Sidebar -->
@@ -607,6 +628,9 @@ select:hover{border-color:#818cf8;color:#fff}
       <div class="sel"><span>全部店铺</span><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></div>
 
       <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
+        <button type="button" class="refresh-btn" id="refreshBtn" title="立即刷新数据">
+          <span class="rf-ico">↻</span><span class="spin"></span><span class="rf-lab">刷新</span>
+        </button>
         <div class="weather" id="weather" title="当地天气（点击刷新）">
           <span class="wic" id="wIcon">⛅</span>
           <span class="winfo"><span class="wt" id="wTemp">--°</span><span class="wd" id="wDesc">天气加载中…</span></span>
@@ -1541,18 +1565,67 @@ const PH_META={
 function fmt(n){return (Math.round(n*100)/100).toLocaleString('en-US');}
 function num(x){const v=parseFloat(x);return isNaN(v)?0:v;}
 
+function showWbToast(msg, isErr){
+  const el=$('#wbToast'); if(!el) return;
+  el.textContent=msg;
+  el.classList.toggle('err', !!isErr);
+  el.classList.add('show');
+  clearTimeout(showWbToast._t);
+  showWbToast._t=setTimeout(()=>el.classList.remove('show'), 2200);
+}
+
 async function loadData(){
   try{
-    const r=await fetch('data.json?t='+Date.now(),{cache:'no-store'});
-    DATA=await r.json();
+    // Prefer future Feishu / custom loaders when wired
+    if(typeof window.loadFromFeishu==='function'){
+      DATA=await window.loadFromFeishu();
+    }else if(typeof window.fetchData==='function'){
+      DATA=await window.fetchData();
+    }else if(typeof window.reloadData==='function'){
+      DATA=await window.reloadData();
+    }else if(window.__EMBEDDED_DATA__){
+      // standalone: clone so later Feishu sync can replace cleanly
+      DATA=JSON.parse(JSON.stringify(window.__EMBEDDED_DATA__));
+    }else{
+      const r=await fetch('data.json?t='+Date.now(),{cache:'no-store'});
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      DATA=await r.json();
+    }
+    if(DATA && !DATA.updated_at){
+      const n=new Date();
+      DATA.updated_at=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0')+' '+String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0');
+    }
     buildPlatNav();
     render();
+    if(window.MOCK){
+      try{renderTodos();renderSuggestions();renderProgress();renderGoals();renderNews();}catch(e){}
+    }
     $('#loading').classList.add('hide');
+    return true;
   }catch(e){
     $('#loading').classList.add('hide');
     console.error(e);
+    throw e;
   }
 }
+
+/** Public hook for Feishu sync / manual refresh. Returns Promise<boolean>. */
+window.refreshWorkbenchData=async function refreshWorkbenchData(){
+  const btn=$('#refreshBtn');
+  if(btn){btn.disabled=true;btn.classList.add('loading');}
+  try{
+    await loadData();
+    try{ if(typeof loadWeather==='function') await loadWeather(); }catch(e){}
+    try{ if(typeof tickClock==='function') tickClock(); }catch(e){}
+    showWbToast('已更新');
+    return true;
+  }catch(e){
+    showWbToast('刷新失败，请稍后重试', true);
+    return false;
+  }finally{
+    if(btn){btn.disabled=false;btn.classList.remove('loading');}
+  }
+};
 
 /* ---- platform helpers ---- */
 function activePlatforms(){
@@ -2225,6 +2298,9 @@ $('#qlAdd').addEventListener('click',addCustomLink);
 // 天气
 loadWeather();
 $('#weather').addEventListener('click',loadWeather);
+// 刷新按钮
+$('#refreshBtn') && $('#refreshBtn').addEventListener('click',()=>window.refreshWorkbenchData());
+
 
 // 主题
 initThemePanel();
